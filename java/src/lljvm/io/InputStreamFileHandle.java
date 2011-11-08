@@ -34,7 +34,7 @@ import lljvm.runtime.Context;
  */
 public class InputStreamFileHandle extends AbstractFileHandle {
     /** The input stream */
-    private InputStream inputStream;
+    protected InputStream inputStream;
     
     /**
      * Construct a new instance with the given input stream.

@@ -98,7 +98,7 @@ int main(int argc, char **argv) {
     pm.add(createGCLoweringPass());
     // TODO: fix switch generation so the following pass is not needed
     pm.add(createLowerSwitchPass());
-    pm.add(createIndVarSimplifyPass());
+    //pm.add(createIndVarSimplifyPass());
     pm.add(createPromoteMemoryToRegisterPass());  //good
     pm.add(createDeadStoreEliminationPass());
     pm.add(createAggressiveDCEPass());

@@ -84,7 +84,7 @@ public final class Function implements Module {
             final String sig = ReflectionUtils.getQualifiedSignature(method);
             functionPointers.put(sig, addr);
             functionObjects.put(addr, new Target(method));
-            method.setAccessible(true);
+//            method.setAccessible(true);
         }
         registeredClasses.add(classname);
     }
@@ -110,7 +110,11 @@ public final class Function implements Module {
                     "Unable to get function pointer for "+sig);
         return functionPointers.get(sig);
     }
-    
+
+    public Method getMethod(int f){
+        return functionObjects.get(f).getMethod();
+    }
+ 
     /**
      * Invoke the method pointed to by the given function pointer with the
      * given arguments.
@@ -127,9 +131,14 @@ public final class Function implements Module {
         final Object instance = target.getInstance(context);
 
         final Class<?>[] paramTypes = method.getParameterTypes();
-        final Object[] params = memory.unpack(args, paramTypes);
+        final Object[] params = new Object[paramTypes.length];
+        int paramsSize = memory.unpack(args, paramTypes, params);
         try {
-            return method.invoke(instance, params);
+            Object o=method.invoke(instance, params);
+            
+            memory.freeStack(paramsSize);   // workaround for lljvm-backend bug
+
+            return o;
         } catch(IllegalAccessException e) {
             throw new RuntimeException(e);
         } catch(InvocationTargetException e) {

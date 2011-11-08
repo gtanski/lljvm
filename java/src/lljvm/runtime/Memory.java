@@ -22,6 +22,7 @@
 
 package lljvm.runtime;
 
+import java.io.UnsupportedEncodingException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Arrays;
@@ -35,7 +36,21 @@ import lljvm.util.ReflectionUtils;
  * @author  David Roberts
  */
 public final class Memory implements Module {
-    private static final int ALIGNMENT = 8; // 8-byte alignment
+    private static final int PAGE_SHIFT = 22;
+    private static final int PAGE_SIZE = 1<<PAGE_SHIFT;
+
+    public static final int ALIGNMENT = 8; // 8-byte alignment
+    public static final int MEM_SIZE = 2<<30; // GiB of virtual memory
+    public static final int MAX_THREADS = 64;
+    public static final int PER_THREAD_STACK=PAGE_SIZE;     // thread stack equals page_size, otherwise sometimes 'double' on page boundary problem appears
+                        // it looks like LLVM code generator does not always align 'double' with 8 bytes on stack
+                        // someone with more LLVM experience please check and fix
+    public static final int STACK_SIZE = MAX_THREADS*PER_THREAD_STACK;
+    private static final int DATA_SIZE = 16<<20; // 16 MiB Data+BSS
+        
+    private static final ByteOrder ENDIANNESS = java.nio.ByteOrder.nativeOrder(); //ByteOrder.LITTLE_ENDIAN;
+    
+    /*private static final int ALIGNMENT = 8; // 8-byte alignment
     private static final int MEM_SIZE = 1<<30; // 1 GiB of virtual memory
     private static final int DATA_SIZE = 1<<20; // 1 MiB Data+BSS
     private static final int STACK_SIZE = 1<<20; // 1 MiB stack
@@ -44,7 +59,9 @@ public final class Memory implements Module {
     private static final int PAGE_SHIFT = 16;
     private static final int PAGE_SIZE = 1<<PAGE_SHIFT;
     
-    private static final ByteOrder ENDIANNESS = ByteOrder.LITTLE_ENDIAN;
+    private static final ByteOrder ENDIANNESS = ByteOrder.LITTLE_ENDIAN;*/
+    
+    Threads threads;
     
     /** Array of pages */
     private final ByteBuffer[] pages =
@@ -65,15 +82,15 @@ public final class Memory implements Module {
         final int DATA_END = (DATA_SIZE - 1)>>>PAGE_SHIFT;
         for(int i = DATA_BOTTOM; i <= DATA_END; i++)
             pages[i] = createPage();
-        final int STACK_BOTTOM = (MEM_SIZE - STACK_SIZE)>>>PAGE_SHIFT;
-        final int STACK_END = (MEM_SIZE - 1)>>>PAGE_SHIFT;
-        for(int i = STACK_BOTTOM; i <= STACK_END; i++)
-            pages[i] = createPage();
+        
+        //java.lang.System.out.println("Adress space - Data end: "+Integer.toHexString(DATA_SIZE)+" Stack bottom: "+Integer.toHexString(stackBottom())+" Mem end:"+Integer.toHexString(stackEnd()));
     }
 
     /** The null pointer */
     public final int NULL = allocateData();
-    
+
+    /** String conversion options */
+    public static String charsetName="UTF-8";
 
     /**
      * Thrown if an application tries to access an invalid memory address, or
@@ -97,6 +114,7 @@ public final class Memory implements Module {
     @Override
     public void initialize(Context context) {
         this.context = context;
+        this.threads=context.getModule(Threads.class);
     }
 
     @Override
@@ -109,6 +127,27 @@ public final class Memory implements Module {
      */
     private static ByteBuffer createPage() {
         return ByteBuffer.allocate(PAGE_SIZE).order(ENDIANNESS);
+    }
+
+    public int stackBottom(){
+        return (MEM_SIZE - STACK_SIZE);
+    }
+    public int stackEnd(){
+        return (MEM_SIZE - 1);
+    }
+    public void createStack(int index){ // creates stack pages
+        final int STACK_BOTTOM = (stackBottom()+index*PER_THREAD_STACK)>>>PAGE_SHIFT;
+        final int STACK_END = (stackBottom()+(index+1)*PER_THREAD_STACK-1)>>>PAGE_SHIFT;
+        
+        for(int i = STACK_BOTTOM; i <= STACK_END; i++)
+            pages[i] = createPage();        
+    }
+    public void destroyStack(int index){
+        final int STACK_BOTTOM = (stackBottom()+index*PER_THREAD_STACK)>>>PAGE_SHIFT;
+        final int STACK_END = (stackBottom()+(index+1)*PER_THREAD_STACK-1)>>>PAGE_SHIFT;
+        
+        for(int i = STACK_BOTTOM; i <= STACK_END; i++)
+            pages[i] = null;       
     }
     
     /**
@@ -143,7 +182,7 @@ public final class Memory implements Module {
      * @param align   the required alignment. Must be a power of two.
      * @return        the aligned offset
      */
-    private static int alignOffsetUp(int offset, int align) {
+    public static int alignOffsetUp(int offset, int align) {
         return ((offset-1) & ~(align-1)) + align;
     }
 
@@ -155,46 +194,66 @@ public final class Memory implements Module {
      * @param align   the required alignment. Must be a power of two.
      * @return        the aligned offset
      */
-    private static int alignOffsetDown(int offset, int align) {
+    public static int alignOffsetDown(int offset, int align) {
         return offset & ~(align-1);
     }
+
+    /* Wrappers from static calls to Thread.stack */
+    public Stack getCurrentThreadStack(){
+        return threads.getCurrentThreadStack();
+    }
     
-    /**
-     * Create a new stack frame, storing the current frame pointer.
-     */
     public void createStackFrame() {
-        final int prevFramePointer = framePointer;
-        framePointer = stackPointer;
-        storeStack(prevFramePointer);
-        stackDepth++;
+         getCurrentThreadStack().createStackFrame();
     }
-    
-    /**
-     * Destroy the current stack frame, restoring the previous frame pointer.
-     */
     public void destroyStackFrame() {
-        stackPointer = framePointer;
-        framePointer = load_i32(stackPointer - ALIGNMENT);
-        stackDepth--;
+         getCurrentThreadStack().destroyStackFrame();
     }
-    
-    /**
-     * Destroy the top n stack frames.
-     * 
-     * @param n  the number of stack frames to destroy
-     */
     public void destroyStackFrames(int n) {
-        for(int i = 0; i < n; i++)
-            destroyStackFrame();
+         getCurrentThreadStack().destroyStackFrames(n);
     }
-    
-    /**
-     * Return the number of stack frames currently on the stack.
-     * 
-     * @return  the number of stack frames currently on the stack
-     */
     public int getStackDepth() {
-        return stackDepth;
+        return getCurrentThreadStack().getStackDepth();
+    }
+    public int allocateStack(int arg) {
+        return getCurrentThreadStack().allocateStack(arg);
+    }
+    public int freeStack(int arg) {
+        return getCurrentThreadStack().freeStack(arg);
+    }
+    public int allocateStack(){
+        return getCurrentThreadStack().allocateStack();
+    }
+
+    public int storeStack(boolean arg) {
+        return getCurrentThreadStack().storeStack(arg);
+    }
+    public int storeStack(byte arg) {
+        return getCurrentThreadStack().storeStack(arg);
+    }
+    public int storeStack(short arg) {
+        return getCurrentThreadStack().storeStack(arg);
+    }
+    public int storeStack(int arg) {
+        return getCurrentThreadStack().storeStack(arg);
+    }
+    public int storeStack(long arg) {
+        return getCurrentThreadStack().storeStack(arg);
+    }
+    public int storeStack(float arg) {
+        return getCurrentThreadStack().storeStack(arg);
+    }
+    public int storeStack(double arg) {
+        return getCurrentThreadStack().storeStack(arg);
+    }
+    public int storeStack(byte[] arg) {
+        return getCurrentThreadStack().storeStack(arg);
+    }
+    public int storeStack(String[] arg) {
+        return getCurrentThreadStack().storeStack(arg);
+    }
+    public int storeStack(String arg) {
+        return getCurrentThreadStack().storeStack(arg);
     }
     
     /**
@@ -219,26 +278,6 @@ public final class Memory implements Module {
     }
     
     /**
-     * Allocate a block of the given size within the stack.
-     * 
-     * @param size  the size of the block to allocate
-     * @return      a pointer to the allocated block
-     */
-    public int allocateStack(int size) {
-        stackPointer = alignOffsetDown(stackPointer - size, ALIGNMENT);
-        return stackPointer;
-    }
-    
-    /**
-     * Allocate one byte within the stack.
-     * 
-     * @return  a pointer to the allocated byte
-     */
-    public int allocateStack() {
-        return allocateStack(1);
-    }
-    
-    /**
      * Increase the size of the heap by the specified amount.
      * 
      * @param increment  the amount to increment the heap size
@@ -255,9 +294,14 @@ public final class Memory implements Module {
         heapEnd += increment;
         final int HEAP_BOTTOM = prevHeapEnd>>>PAGE_SHIFT;
         final int HEAP_END = (heapEnd - 1)>>>PAGE_SHIFT;
-        for(int i = HEAP_BOTTOM; i <= HEAP_END; i++)
-            if(pages[i] == null)
+        
+        for (int i = HEAP_BOTTOM; i <= HEAP_END; i++){
+            if(pages[i] == null){
                 pages[i] = createPage();
+                
+                //java.lang.System.out.println(i<<PAGE_SHIFT);
+            }
+        }
         // TODO: destroy pages if increment < 0
         return prevHeapEnd;
     }
@@ -379,7 +423,13 @@ public final class Memory implements Module {
      * @param string  the string to be stored
      */
     public void store(int addr, String string) {
-        final byte[] bytes = string.getBytes();
+        final byte[] bytes;
+	try {
+	    bytes = string.getBytes(charsetName);
+	} catch (UnsupportedEncodingException ex) {
+	    store(addr,0);
+	    return;
+	}
         store(addr, bytes);
         store(addr + bytes.length, (byte) 0);
     }
@@ -394,11 +444,18 @@ public final class Memory implements Module {
      * @return        addr on success, NULL on error
      */
     public int store(int addr, String string, int size) {
-        final byte[] bytes = string.getBytes();
+        final byte[] bytes;
+	try {
+	    bytes = string.getBytes(charsetName);
+	} catch (UnsupportedEncodingException ex) {
+
+            return NULL;
+	}
         if(bytes.length + 1 > size) {
-            context.getModule(Error.class).errno(Error.ERANGE);
+            
             return NULL;
         }
+        
         store(addr, bytes);
         store(addr + bytes.length, (byte) 0);
         return addr;
@@ -514,134 +571,12 @@ public final class Memory implements Module {
      * @return        a pointer to the string
      */
     public int storeData(String string) {
-        final byte[] bytes = string.getBytes();
+        byte[] bytes={};
+	try {
+	    bytes = string.getBytes(charsetName);
+	} catch (UnsupportedEncodingException ex) {
+	}
         final int addr = allocateData(bytes.length+1);
-        store(addr, bytes);
-        store(addr + bytes.length, (byte) 0);
-        return addr;
-    }
-    
-    /**
-     * Store a boolean value in the stack, returning a pointer to the value.
-     * 
-     * @param value  the value to be stored
-     * @return       a pointer to the value
-     */
-    public int storeStack(boolean value) {
-        final int addr = allocateStack(1);
-        store(addr, value);
-        return addr;
-    }
-    
-    /**
-     * Store a byte in the stack, returning a pointer to the value.
-     * 
-     * @param value  the value to be stored
-     * @return       a pointer to the value
-     */
-    public int storeStack(byte value) {
-        final int addr = allocateStack(1);
-        store(addr, value);
-        return addr;
-    }
-    
-    /**
-     * Store a 16-bit integer in the stack, returning a pointer to the value.
-     * 
-     * @param value  the value to be stored
-     * @return       a pointer to the value
-     */
-    public int storeStack(short value) {
-        final int addr = allocateStack(2);
-        store(addr, value);
-        return addr;
-    }
-    
-    /**
-     * Store a 32-bit integer in the stack, returning a pointer to the value.
-     * 
-     * @param value  the value to be stored
-     * @return       a pointer to the value
-     */
-    public int storeStack(int value) {
-        final int addr = allocateStack(4);
-        store(addr, value);
-        return addr;
-    }
-    
-    /**
-     * Store a 64-bit integer in the stack, returning a pointer to the value.
-     * 
-     * @param value  the value to be stored
-     * @return       a pointer to the value
-     */
-    public int storeStack(long value) {
-        final int addr = allocateStack(8);
-        store(addr, value);
-        return addr;
-    }
-    
-    /**
-     * Store a single precision floating point number in the stack,
-     * returning a pointer to the value.
-     * 
-     * @param value  the value to be stored
-     * @return       a pointer to the value
-     */
-    public int storeStack(float value) {
-        final int addr = allocateStack(4);
-        store(addr, value);
-        return addr;
-    }
-    
-    /**
-     * Store a double precision floating point number in the stack,
-     * returning a pointer to the value.
-     * 
-     * @param value  the value to be stored
-     * @return       a pointer to the value
-     */
-    public int storeStack(double value) {
-        final int addr = allocateStack(8);
-        store(addr, value);
-        return addr;
-    }
-    
-    /**
-     * Store an array of bytes in the stack, returning a pointer to the bytes.
-     * 
-     * @param bytes  the bytes to be stored
-     * @return       a pointer to the bytes
-     */
-    public int storeStack(byte[] bytes) {
-        final int addr = allocateStack(bytes.length);
-        store(addr, bytes);
-        return addr;
-    }
-    
-    /**
-     * Store an array of strings in the stack, terminated by a null pointer.
-     * 
-     * @param strings  the array of strings to be stored
-     * @return         a pointer to the array
-     */
-    public int storeStack(String[] strings) {
-        final int addr = allocateStack(strings.length * 4 + 4);
-        for(int i = 0; i < strings.length; i++)
-            store(addr + i * 4, storeStack(strings[i]));
-        store(addr + strings.length * 4, NULL);
-        return addr;
-    }
-    
-    /**
-     * Store a string in the stack, returning a pointer to the string.
-     * 
-     * @param string  the string to be stored
-     * @return        a pointer to the string
-     */
-    public int storeStack(String string) {
-        final byte[] bytes = string.getBytes();
-        final int addr = allocateStack(bytes.length+1);
         store(addr, bytes);
         store(addr + bytes.length, (byte) 0);
         return addr;
@@ -754,9 +689,40 @@ public final class Memory implements Module {
     public String load_string(int addr) {
         byte[] bytes = new byte[16];
         int i = 0;
-        while((bytes[i++] = load_i8(addr++)) != 0)
+        
+	while((bytes[i++] = load_i8(addr++)) != 0){
             if(i >= bytes.length) bytes = Arrays.copyOf(bytes, i*2);
-        return new String(Arrays.copyOf(bytes, i));
+	}
+
+	try {
+	    return new String(Arrays.copyOf(bytes, i), charsetName);
+	} catch (UnsupportedEncodingException ex) {
+	}
+
+	return "";
+    }
+
+    // same as above, but skip trailing zero (correct)
+    
+    public String load_string_s0(int addr){
+        int i=0;
+        
+        while(load_i8(addr+i)!=0){
+            i++;
+        }
+        
+        byte[] bytes=new byte[i];
+        
+        for (int j=0 ; j<i ; j++){
+            bytes[j]=load_i8(addr+j);
+        }
+        
+	try {
+	    return new String(bytes, charsetName);
+	} catch (UnsupportedEncodingException ex) {
+	}
+
+	return "";        
     }
     
     /**
@@ -906,7 +872,11 @@ public final class Memory implements Module {
      * @return        the first address following the null terminator
      */
     public int pack(int addr, String string) {
-        final byte[] bytes = string.getBytes();
+        byte[] bytes={};
+	try {
+	    bytes = string.getBytes(charsetName);
+	} catch (UnsupportedEncodingException ex) {
+	}
         store(addr, bytes);
         store(addr + bytes.length, (byte) 0);
         return addr + bytes.length + 1;
@@ -952,7 +922,21 @@ public final class Memory implements Module {
      *               other than char.
      * @return       an array of unpacked values
      */
-    public Object[] unpack(int addr, Class<?>[] types) {
+    public int unpack(int addr, Class<?>[] types, Object[] values) {
+        int saddr=addr;
+
+        for(int i = 0; i < types.length; i++) {
+            final Class<?> type = types[i];
+            final int size = ReflectionUtils.sizeOf(type);
+
+            addr = alignOffsetUp(addr, size);
+            values[i] = load(addr, type);
+            addr += size;
+        }
+
+        return addr-saddr;
+    }
+    /*public Object[] unpack(int addr, Class<?>[] types) {
         Object[] values = new Object[types.length];
         for(int i = 0; i < types.length; i++) {
             final Class<?> type = types[i];
@@ -962,7 +946,7 @@ public final class Memory implements Module {
             addr += size;
         }
         return values;
-    }
+    }*/
     
     /**
      * Copy len bytes from memory area src to memory area dest. The memory

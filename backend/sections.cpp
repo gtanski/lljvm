@@ -50,7 +50,7 @@ void JVMWriter::printFields() {
             externRefs.insert(i);
         } else
             out << ".field "
-                << (i->hasLocalLinkage() ? "private " : "public ")
+                << (i->hasLocalLinkage() ? "public " : "public ")	// private here causes problems
                 << "final ";
         out << getValueName(i) << ' ' << getTypeDescriptor(i->getType());
         if(debug >= 3)

@@ -302,7 +302,7 @@ void JVMWriter::printFunction(const Function &f) {
     std::string method;
     raw_string_ostream methodstrm(method);
     
-    methodstrm << ".method " << (f.hasLocalLinkage() ? "private " : "public ")
+    methodstrm << ".method " << (f.hasLocalLinkage() ? "public " : "public ")	// private here causes problems
         << getValueName(&f) << '(';
     for(Function::const_arg_iterator i = f.arg_begin(), e = f.arg_end();
         i != e; i++)

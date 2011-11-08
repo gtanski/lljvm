@@ -37,14 +37,20 @@ import lljvm.runtime.Module;
  */
 public class NativeFileSystem implements FileSystem, Module {
     /** User working directory system property */
-    private static final String USER_DIR = System.getProperty("user.dir");
+    private final String USER_DIR;
     /** Current working directory */
-    private File cwd = (USER_DIR == null ? new File("") : new File(USER_DIR));
+    private File cwd;
     
-    private Error error;
-    private Context context;
+    protected Error error;
+    protected Context context;
     
+    protected NativeFileSystem(String user_dir){
+        USER_DIR = null;
+        cwd = (user_dir == null ? new File("") : new File(user_dir));
+    }
     public NativeFileSystem() {
+        USER_DIR = System.getProperty("user.dir");
+        cwd = (USER_DIR == null ? new File("") : new File(USER_DIR));
     }
     
     @Override
